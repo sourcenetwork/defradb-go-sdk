@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Go SDK against the pinned defradb.rs FFI
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the defradb.rs pin
+        run: echo "DEFRADB_RS_COMMIT=$(cat DEFRADB_RS_COMMIT)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          repository: sourcenetwork/defradb.rs
+          ref: ${{ env.DEFRADB_RS_COMMIT }}
+          path: defradb.rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+      - run: defradb.rs/.github/scripts/install-linux-ci-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: defradb.rs
+          key: ${{ env.DEFRADB_RS_COMMIT }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build the FFI library and its header
+        working-directory: defradb.rs
+        run: |
+          cargo build -p ffi --profile super-dev
+          cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output crates/ffi/defra.h
+      - name: Run the SDK's tests against it
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          RS="$GITHUB_WORKSPACE/defradb.rs"
+          export CGO_CFLAGS="-I$RS/crates/ffi"
+          export CGO_LDFLAGS="-L$RS/target/super-dev -Wl,-rpath,$RS/target/super-dev"
+          go test -race -count=1 ./...
