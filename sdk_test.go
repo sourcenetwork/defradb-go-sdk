@@ -473,3 +473,13 @@ func TestTheEventRelayParksWhileIdle(t *testing.T) {
 		t.Fatal("an event arrives while the relay is parked")
 	}
 }
+
+func TestCloseTwice(t *testing.T) {
+	n := start(t, nil, nil)
+	if err := n.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

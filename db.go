@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,7 @@ type DB struct {
 	stop   chan struct{}
 	done   chan struct{}
 	waits  atomic.Int64 // library waits the relay made, for its idle test
+	closed sync.Once
 }
 
 var (
@@ -67,13 +69,16 @@ func (d *DB) Events() event.Bus {
 	return d.events
 }
 
-// Close stops the event relay and closes the database.
+// Close stops the event relay and closes the database. Closing again does
+// nothing.
 func (d *DB) Close() {
-	close(d.stop)
-	_ = C.close_subscription(d.sub)
-	<-d.done
-	_, _ = result(C.node_close(d.ptr), "close")
-	d.events.Close()
+	d.closed.Do(func() {
+		close(d.stop)
+		_ = C.close_subscription(d.sub)
+		<-d.done
+		_, _ = result(C.node_close(d.ptr), "close")
+		d.events.Close()
+	})
 }
 
 // NewTxn begins a transaction; its writes land when it commits.
