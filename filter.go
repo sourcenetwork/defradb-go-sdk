@@ -19,9 +19,17 @@ import (
 // defraSDKReplicationFilter is the library's replication filter callback for
 // a node opened with a ReplicationFilter: context is a cgo.Handle of the
 // filter. The library calls it from its database workers, several at once.
+// A panic, the filter's or a deleted handle's, keeps the document: a panic
+// must not cross into the library, and keeping is what a filter that cannot
+// decide does.
 //
 //export defraSDKReplicationFilter
-func defraSDKReplicationFilter(context C.uintptr_t, collectionID, docID, fieldsJSON *C.char) C.int {
+func defraSDKReplicationFilter(context C.uintptr_t, collectionID, docID, fieldsJSON *C.char) (keep C.int) {
+	defer func() {
+		if recover() != nil {
+			keep = 1
+		}
+	}()
 	filter, ok := cgo.Handle(context).Value().(client.ReplicationFilter)
 	if !ok {
 		return 1
@@ -86,7 +94,8 @@ func numbers(value any) any {
 
 // defraSDKRetentionRule is the library's retention callback: the Go
 // `client.RetentionRule` the handle context names gives the collection's
-// height field and floor. A floor of zero or less refuses nothing.
+// height field and floor. A floor of zero or less refuses nothing, and so
+// does a panic, the rule's or a deleted handle's.
 //
 //export defraSDKRetentionRule
 func defraSDKRetentionRule(
@@ -95,7 +104,12 @@ func defraSDKRetentionRule(
 	fieldOut *C.char,
 	fieldCapacity C.size_t,
 	floorOut *C.int64_t,
-) C.int {
+) (found C.int) {
+	defer func() {
+		if recover() != nil {
+			found = 0
+		}
+	}()
 	rule, ok := cgo.Handle(context).Value().(client.RetentionRule)
 	if !ok {
 		return 0

@@ -483,3 +483,51 @@ func TestCloseTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type panicFilter struct{ calls atomic.Int64 }
+
+func (f *panicFilter) AllowReplication(context.Context, string, string, map[string]any) bool {
+	f.calls.Add(1)
+	panic("filter")
+}
+
+type panicRule struct{ calls atomic.Int64 }
+
+func (r *panicRule) RetentionFloor(string) (string, int64, bool) {
+	r.calls.Add(1)
+	panic("rule")
+}
+
+func TestAPanickingFilterOrRuleKeepsTheDocument(t *testing.T) {
+	ctx := context.Background()
+	filter, rule := &panicFilter{}, &panicRule{}
+	listen := func(nb *options.NodeOptionsBuilder) { nb.P2P().SetListenAddresses("/ip4/127.0.0.1/tcp/0") }
+	source := start(t, listen, nil)
+	target := start(t, listen, func(n *Node) {
+		n.ReplicationFilter = filter
+		n.RetentionRule = rule
+	})
+	addresses, err := target.DB.PeerInfo(ctx)
+	if err != nil || len(addresses) == 0 {
+		t.Fatalf("peer info %v %v", addresses, err)
+	}
+	if err := source.DB.AddReplicator(ctx, addresses[:1], options.AddReplicator().SetCollectionNames([]string{"User"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := collectionOf(t, source.DB).SaveManyDocuments(ctx, docs(t, collectionOf(t, source.DB), `{"name": "Alice", "age": 40}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"User":[{"age":40,"name":"Alice"}]}`
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		got := names(t, target.DB)
+		if got == want && filter.calls.Load() >= 1 && rule.calls.Load() >= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the target holds %s after %d filter and %d rule calls; want %s",
+				got, filter.calls.Load(), rule.calls.Load(), want)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
