@@ -44,13 +44,21 @@ type Node struct {
 	handles []cgo.Handle
 	server  *defrahttp.Server
 	handler *defrahttp.Handler
+	apiErr  chan error
 }
 
 // New resolves opts over Go DefraDB's defaults; nothing opens until Start.
 func New(ctx context.Context, opts ...options.Enumerable[options.NodeOptions]) (*Node, error) {
 	resolved := node.DefaultNodeOptions()
 	applyOptions(&resolved, opts...)
-	return &Node{opts: &resolved}, nil
+	return &Node{opts: &resolved, apiErr: make(chan error, 1)}, nil
+}
+
+// APIError receives at most one error: the HTTP API's server stopping for
+// any reason but Close, as Go DefraDB's `node.Node.APIError` does. It is
+// never closed.
+func (n *Node) APIError() <-chan error {
+	return n.apiErr
 }
 
 // Options are the node's resolved options.
@@ -160,7 +168,10 @@ func (n *Node) startAPI() error {
 	}
 	go func() {
 		if err := server.Serve(); err != nil && !errors.Is(err, gohttp.ErrServerClosed) {
-			return
+			select {
+			case n.apiErr <- err:
+			default:
+			}
 		}
 	}()
 	n.handler, n.server, n.APIURL = handler, server, server.Address()

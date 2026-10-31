@@ -549,3 +549,24 @@ func TestAFailedAPILeavesNothingOpen(t *testing.T) {
 		t.Fatalf("a failed Start left the database %v and handles %v open", n.DB, n.handles)
 	}
 }
+
+func TestClosingTheAPIIsNotAnAPIError(t *testing.T) {
+	ctx := context.Background()
+	nb := options.Node()
+	nb.HTTP().SetAddress("127.0.0.1:0")
+	n, err := New(ctx, nb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-n.APIError():
+		t.Fatalf("a closed API reported %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
