@@ -134,7 +134,13 @@ func (n *Node) Start(ctx context.Context) error {
 	if o.DisableAPI {
 		return nil
 	}
-	return n.startAPI()
+	if err := n.startAPI(); err != nil {
+		// A failed Start leaves nothing open.
+		_ = n.Close(ctx)
+		n.DB = nil
+		return err
+	}
+	return nil
 }
 
 // startAPI serves Go DefraDB's HTTP handler over DB.

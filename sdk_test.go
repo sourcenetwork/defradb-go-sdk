@@ -531,3 +531,21 @@ func TestAPanickingFilterOrRuleKeepsTheDocument(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+func TestAFailedAPILeavesNothingOpen(t *testing.T) {
+	ctx := context.Background()
+	nb := options.Node()
+	nb.HTTP().SetAddress("invalid")
+	n, err := New(ctx, nb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.ReplicationFilter = &refuseName{name: "Mallory"}
+	if err := n.Start(ctx); err == nil {
+		_ = n.Close(ctx)
+		t.Fatal("an address it cannot listen on fails Start")
+	}
+	if n.DB != nil || n.handles != nil {
+		t.Fatalf("a failed Start left the database %v and handles %v open", n.DB, n.handles)
+	}
+}
