@@ -156,6 +156,10 @@ func TestDocumentsThroughTheCollection(t *testing.T) {
 	if err := collection.UpdateDocument(ctx, got); err != nil {
 		t.Fatal(err)
 	}
+	absent := docs(t, collection, `{"name": "Dave", "age": 9}`)[0]
+	if err := collection.UpdateDocument(ctx, absent); !errors.Is(err, client.ErrDocumentNotFoundOrNotAuthorized) {
+		t.Fatalf("updating an absent document is not found: %v", err)
+	}
 
 	deleted, err := collection.DeleteDocumentsWithFilter(ctx, map[string]any{"age": map[string]any{"_lt": 5}})
 	if err != nil {

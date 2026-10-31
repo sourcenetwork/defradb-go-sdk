@@ -94,14 +94,33 @@ func (c *Collection) AddManyDocuments(
 	return nil
 }
 
-// UpdateDocument writes doc's values over the document its DocID names.
+// UpdateDocument writes doc's changed values over the document its DocID
+// names. A DocID that names no document is client.ErrDocumentNotFoundOrNotAuthorized,
+// as Go DefraDB returns: an update never adds a document.
 func (c *Collection) UpdateDocument(
 	ctx context.Context,
 	doc *client.Document,
 	opts ...options.Enumerable[options.UpdateDocumentOptions],
 ) error {
 	o := newOptions(opts...)
-	return c.save(ctx, []*client.Document{doc}, did(o.Identity), false, nil)
+	input, err := doc.ToJSONPatch()
+	if err != nil {
+		return err
+	}
+	name := c.Name()
+	request := fmt.Sprintf(
+		`mutation($input: %sMutationInputArg) { update_%s(docID: %q, input: $input) { _docID } }`,
+		name, name, doc.ID().String(),
+	)
+	res := c.st.exec(ctx, request, did(o.Identity), map[string]any{"input": json.RawMessage(input)})
+	if len(res.GQL.Errors) > 0 {
+		return res.GQL.Errors[0]
+	}
+	if len(docIDs(res.GQL.Data, "update_"+name)) == 0 {
+		return client.ErrDocumentNotFoundOrNotAuthorized
+	}
+	doc.Clean()
+	return nil
 }
 
 // SaveDocument adds doc, or updates it when it exists.
