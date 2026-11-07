@@ -85,7 +85,8 @@ func (n *Node) Options() *options.NodeOptions {
 //
 // Of the options it honours the store path and in-memory store, DisableP2P,
 // DisableAPI, the HTTP options, the DB identity (which signs the blocks the
-// node writes when signing is on), the searchable encryption key, node
+// node writes when signing is on), MaxTxnRetries, ChunkSize, the store's
+// encryption key (32 bytes), the searchable encryption key, node
 // access control, the remote document ACP (its log ID, addresses and signer), and every
 // P2P option but EnableClearBackoffOnRetry and PrivateKey (New refuses a
 // PrivateKey). Options the Rust node has no equivalent for are ignored.
@@ -99,12 +100,23 @@ func (n *Node) Start(ctx context.Context) error {
 	defer a.free()
 
 	var c C.struct_NodeInitOptions
-	if o.Store.Path != "" && !o.Store.BadgerInMemory && o.Store.Store != options.NodeMemoryStore {
-		c.db_path = a.s(o.Store.Path)
+	if path := n.storePath(); path != "" {
+		c.db_path = a.s(path)
 	} else {
 		c.in_memory = 1
 	}
 	c.iroh_discovery = 1
+	if o.DB.MaxTxnRetries.HasValue() {
+		c.max_txn_retries = C.uint32_t(o.DB.MaxTxnRetries.Value())
+	}
+	if o.DB.ChunkSize.HasValue() {
+		c.chunk_size = C.uintptr_t(o.DB.ChunkSize.Value())
+	}
+	if key := o.Store.BadgerEncryptionKey; len(key) > 0 {
+		c.at_rest_encryption_key = (*C.uint8_t)(C.CBytes(key))
+		a.p = append(a.p, unsafe.Pointer(c.at_rest_encryption_key))
+		c.at_rest_encryption_key_len = C.uintptr_t(len(key))
+	}
 	if o.DB.Identity.HasValue() {
 		full, ok := o.DB.Identity.Value().(identity.FullIdentity)
 		if !ok {
@@ -180,6 +192,16 @@ func (n *Node) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// storePath is where the node's store lives on disk, empty when it lives in
+// memory.
+func (n *Node) storePath() string {
+	o := n.opts.Store
+	if o.Path == "" || o.BadgerInMemory || o.Store == options.NodeMemoryStore {
+		return ""
+	}
+	return o.Path
 }
 
 // configure applies the options the library sets on a running node: the

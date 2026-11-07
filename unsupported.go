@@ -8,11 +8,6 @@ import (
 	"io"
 )
 
-func (s *store) PrintDump(ctx context.Context) (err error) {
-	err = errNotSupported("PrintDump")
-	return
-}
-
 func (d *DB) ExportDocKVs(
 	ctx context.Context,
 	collectionName string,

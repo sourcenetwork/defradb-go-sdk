@@ -639,3 +639,72 @@ func eventually(t *testing.T, op func() error) {
 		time.Sleep(250 * time.Millisecond)
 	}
 }
+
+func TestPrintDumpAndNodeSettings(t *testing.T) {
+	n := start(t, func(nb *options.NodeOptionsBuilder) {
+		nb.DB().SetMaxTxnRetries(7).SetChunkSize(4096)
+	}, nil)
+	if got := n.DB.MaxTxnRetries(); got != 7 {
+		t.Fatalf("max txn retries %d", got)
+	}
+	if err := n.DB.PrintDump(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := start(t, nil, nil).DB.MaxTxnRetries(); got <= 0 {
+		t.Fatalf("default max txn retries %d", got)
+	}
+}
+
+func TestStoreEncryptionKey(t *testing.T) {
+	ctx := context.Background()
+	open := func(key []byte) (*Node, error) {
+		nb := options.Node()
+		nb.SetDisableAPI(true)
+		nb.Store().SetPath(t.TempDir()).SetBadgerEncryptionKey(key)
+		n, err := New(ctx, nb)
+		if err != nil {
+			return nil, err
+		}
+		return n, n.Start(ctx)
+	}
+	n, err := open([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = n.Close(ctx)
+	if _, err := open([]byte("too short")); err == nil || !strings.Contains(err.Error(), "32 bytes") {
+		t.Fatalf("a short key: %v", err)
+	}
+}
+
+func TestPurgeAndRestart(t *testing.T) {
+	ctx := context.Background()
+	owner := newIdentity(t)
+	nb := options.Node()
+	nb.SetDisableAPI(true).SetEnableDevelopment(true)
+	nb.Store().SetPath(t.TempDir())
+	nb.DB().SetNodeIdentity(owner)
+	nb.NodeACP().SetEnabled(true)
+	n, err := New(ctx, nb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close(ctx) })
+	if _, err := n.DB.AddCollection(ctx, users, options.AddCollection().SetIdentity(owner)); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PurgeAndRestart(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.DB.GetCollectionByName(ctx, "User", options.GetCollectionByName().SetIdentity(owner)); !errors.Is(err, client.ErrCollectionNotFound) {
+		t.Fatalf("the store was purged: %v", err)
+	}
+
+	plain := start(t, nil, nil)
+	if err := plain.PurgeAndRestart(ctx); err == nil || !strings.Contains(err.Error(), "development mode") {
+		t.Fatalf("without development mode: %v", err)
+	}
+}
