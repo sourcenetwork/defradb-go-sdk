@@ -13,7 +13,6 @@ import (
 
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
-	"github.com/sourcenetwork/defradb/node"
 )
 
 const users = "type User { name: String @index age: Int }"
@@ -98,7 +97,7 @@ func TestExecRequestAndSaveManyDocuments(t *testing.T) {
 		t.Fatalf("name %q", collection.Name())
 	}
 	saved := docs(t, collection, `{"name": "Alice", "age": 40}`, `{"name": "Bob", "age": 7}`)
-	if err := collection.SaveManyDocuments(ctx, saved); err != nil {
+	if err := collection.(*Collection).SaveManyDocuments(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
 	if got := names(t, n.DB); got != `{"User":[{"age":40,"name":"Alice"},{"age":7,"name":"Bob"}]}` {
@@ -177,7 +176,7 @@ func TestDocumentsThroughTheCollection(t *testing.T) {
 	if got := names(t, n.DB); got != `{"User":[]}` {
 		t.Fatal(got)
 	}
-	if _, err := n.DB.ListReplicators(ctx); !errors.Is(err, ErrNotSupported) {
+	if _, err := n.DB.ExportFieldMapping(ctx, "User"); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("an unoffered method says so: %v", err)
 	}
 }
@@ -186,7 +185,7 @@ func TestTransactionsAndPurgeByDocIDs(t *testing.T) {
 	n := start(t, nil, nil)
 	ctx := context.Background()
 	saved := docs(t, collectionOf(t, n.DB), `{"name": "Alice", "age": 40}`, `{"name": "Bob", "age": 7}`)
-	if err := collectionOf(t, n.DB).SaveManyDocuments(ctx, saved); err != nil {
+	if err := collectionOf(t, n.DB).(*Collection).SaveManyDocuments(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,7 +193,7 @@ func TestTransactionsAndPurgeByDocIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := collectionOf(t, txn).PurgeByDocIDs(ctx, []client.DocID{saved[0].ID()}, true); err != nil {
+	if err := collectionOf(t, txn).(*Collection).PurgeByDocIDs(ctx, []client.DocID{saved[0].ID()}, true); err != nil {
 		t.Fatal(err)
 	}
 	if got := names(t, n.DB); !strings.Contains(got, "Alice") {
@@ -215,20 +214,6 @@ func TestTransactionsAndPurgeByDocIDs(t *testing.T) {
 	discarded.Discard()
 	if got := names(t, n.DB); strings.Contains(got, "Carol") {
 		t.Fatalf("a discarded transaction stores nothing: %s", got)
-	}
-}
-
-func TestAGoBatchCollectorIsNotSupported(t *testing.T) {
-	n := start(t, nil, nil)
-	collector := node.NewBatchCIDCollector()
-	ctx := node.ContextWithBatchSigning(context.Background(), collector)
-	collection := collectionOf(t, n.DB)
-	err := collection.AddManyDocuments(ctx, docs(t, collection, `{"name": "Alice", "age": 40}`))
-	if !errors.Is(err, ErrNotSupported) {
-		t.Fatalf("a write with a batch collector says it is not supported: %v", err)
-	}
-	if got := names(t, n.DB); got != `{"User":[]}` {
-		t.Fatalf("a refused write stores nothing: %s", got)
 	}
 }
 
@@ -279,7 +264,7 @@ func TestReplicationThroughTheFilter(t *testing.T) {
 	}
 	saved := docs(t, collectionOf(t, source.DB),
 		`{"name": "Alice", "age": 40}`, `{"name": "Mallory", "age": 9}`, `{"name": "Bob", "age": 7}`)
-	if err := collectionOf(t, source.DB).SaveManyDocuments(ctx, saved); err != nil {
+	if err := collectionOf(t, source.DB).(*Collection).SaveManyDocuments(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
 	want := `{"User":[{"age":40,"name":"Alice"},{"age":7,"name":"Bob"}]}`
@@ -318,35 +303,16 @@ func TestUnsupportedNodeOptionsAreErrors(t *testing.T) {
 	if _, err := New(ctx, nb); !errors.Is(err, ErrNotSupported) || !strings.Contains(err.Error(), "PrivateKey") {
 		t.Fatalf("a peer key: %v", err)
 	}
-	nb = options.Node()
-	nb.SetDisableAPI(true)
-	n, err := New(ctx, nb)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.RetentionRule = noFloor{}
-	if err := n.Start(ctx); !errors.Is(err, ErrNotSupported) || !strings.Contains(err.Error(), "RetentionRule") {
-		_ = n.Close(ctx)
-		t.Fatalf("a retention rule: %v", err)
-	}
-	if n.DB != nil {
-		t.Fatal("a refused Start opened the database")
-	}
 }
-
-type noFloor struct{}
-
-func (noFloor) RetentionFloor(string) (string, int64, bool) { return "", 0, false }
 
 func TestEveryListenAddressAndTheResourceLimits(t *testing.T) {
 	n := start(t, func(nb *options.NodeOptionsBuilder) {
 		nb.P2P().
 			SetListenAddresses("/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.2/tcp/0").
-			SetResourceMemoryMiB(256).
-			SetResourceFileDescriptors(512).
-			SetMaxStreamsPerPeer(64).
 			SetEnablePubSub(true)
-	}, nil)
+	}, func(n *Node) {
+		n.P2PResources = P2PResources{MemoryMiB: 256, FileDescriptors: 512, MaxStreamsPerPeer: 64}
+	})
 	addresses, err := n.DB.PeerInfo(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +353,7 @@ func TestAPanickingFilterKeepsTheDocument(t *testing.T) {
 	if err := source.DB.AddReplicator(ctx, addresses[:1], options.AddReplicator().SetCollectionNames([]string{"User"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := collectionOf(t, source.DB).SaveManyDocuments(ctx, docs(t, collectionOf(t, source.DB), `{"name": "Alice", "age": 40}`)); err != nil {
+	if err := collectionOf(t, source.DB).(*Collection).SaveManyDocuments(ctx, docs(t, collectionOf(t, source.DB), `{"name": "Alice", "age": 40}`)); err != nil {
 		t.Fatal(err)
 	}
 	want := `{"User":[{"age":40,"name":"Alice"}]}`

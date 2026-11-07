@@ -14,7 +14,6 @@ import (
 
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
-	"github.com/sourcenetwork/defradb/node"
 )
 
 // Collection is one version of a collection, read and written through the
@@ -76,7 +75,7 @@ func (c *Collection) AddManyDocuments(
 	}
 	name := c.Name()
 	request := fmt.Sprintf(`mutation($input: [%sMutationInputArg!]) { add_%s(%s) { _docID } }`, name, name, args)
-	res := c.st.exec(ctx, request, did(o.Identity), map[string]any{"input": inputs})
+	res := c.st.execSigned(ctx, request, did(o.Identity), map[string]any{"input": inputs}, o.EnableSigning)
 	if len(res.GQL.Errors) > 0 {
 		return res.GQL.Errors[0]
 	}
@@ -113,7 +112,7 @@ func (c *Collection) UpdateDocument(
 		`mutation($input: %sMutationInputArg) { update_%s(docID: %q, input: $input) { _docID } }`,
 		name, name, doc.ID().String(),
 	)
-	res := c.st.exec(ctx, request, did(o.Identity), map[string]any{"input": json.RawMessage(input)})
+	res := c.st.execSigned(ctx, request, did(o.Identity), map[string]any{"input": json.RawMessage(input)}, o.EnableSigning)
 	if len(res.GQL.Errors) > 0 {
 		return res.GQL.Errors[0]
 	}
@@ -141,6 +140,9 @@ func (c *Collection) SaveManyDocuments(
 	opts ...options.Enumerable[options.SaveDocumentOptions],
 ) error {
 	o := newOptions(opts...)
+	if o.EnableSigning.HasValue() {
+		return errNotSupported("SaveManyDocuments with EnableSigning")
+	}
 	return c.save(ctx, docs, did(o.Identity), o.EncryptDoc, o.EncryptedFields)
 }
 
@@ -178,9 +180,6 @@ func (c *Collection) save(
 		}); err != nil {
 			return err
 		}
-	}
-	if node.BatchSigningCollectorFromContext(ctx) != nil {
-		return errNotSupported("BatchSigningCollector")
 	}
 	raw, err := result(C.save_many_documents(
 		c.st.ptr, a.opt(c.st.txn), a.opt(identityDID), a.s(c.Name()), docsJSON, optionsJSON,
@@ -267,7 +266,7 @@ func (c *Collection) DeleteDocumentsWithFilter(
 	}
 	name := c.Name()
 	request := fmt.Sprintf(`mutation($filter: %sFilterArg) { delete_%s(filter: $filter) { _docID } }`, name, name)
-	res := c.st.exec(ctx, request, did(o.Identity), map[string]any{"filter": filter})
+	res := c.st.execSigned(ctx, request, did(o.Identity), map[string]any{"filter": filter}, o.EnableSigning)
 	if len(res.GQL.Errors) > 0 {
 		return nil, res.GQL.Errors[0]
 	}
@@ -301,16 +300,101 @@ func (c *Collection) PurgeByDocIDs(
 	return err
 }
 
-// Truncate removes every document of the collection from the node.
+// Truncate removes every document of the collection from the node, or with
+// a Filter only the documents it matches.
 func (c *Collection) Truncate(ctx context.Context, opts ...options.Enumerable[options.TruncateCollectionOptions]) error {
-	if c.st.txn != "" {
-		return errNotSupported("Truncate in a transaction")
+	if err := c.st.outsideTxn("Truncate"); err != nil {
+		return err
 	}
 	o := newOptions(opts...)
 	var a cargs
 	defer a.free()
-	_, err := result(C.truncate_collection(c.st.ptr, a.opt(did(o.Identity)), a.s(c.Name())), "truncate")
+	if o.Filter == nil {
+		_, err := result(C.truncate_collection(c.st.ptr, a.opt(did(o.Identity)), a.s(c.Name())), "truncate")
+		return err
+	}
+	filter := o.Filter
+	if text, ok := filter.(string); ok {
+		filter = json.RawMessage(text)
+	}
+	filterJSON, err := a.json(filter)
+	if err != nil {
+		return err
+	}
+	_, err = result(C.truncate_collection_with_filter(c.st.ptr, a.opt(did(o.Identity)), a.s(c.Name()), filterJSON), "truncate")
 	return err
+}
+
+// DeleteDocument deletes the document docID names, replicating the
+// deletion. A DocID that names no document is false and
+// client.ErrDocumentNotFoundOrNotAuthorized.
+func (c *Collection) DeleteDocument(
+	ctx context.Context,
+	docID client.DocID,
+	opts ...options.Enumerable[options.DeleteDocumentOptions],
+) (bool, error) {
+	o := newOptions(opts...)
+	name := c.Name()
+	request := fmt.Sprintf(`mutation { delete_%s(docID: %q) { _docID } }`, name, docID.String())
+	res := c.st.execSigned(ctx, request, did(o.Identity), nil, o.EnableSigning)
+	if len(res.GQL.Errors) > 0 {
+		return false, res.GQL.Errors[0]
+	}
+	if len(docIDs(res.GQL.Data, "delete_"+name)) == 0 {
+		return false, client.ErrDocumentNotFoundOrNotAuthorized
+	}
+	return true, nil
+}
+
+// ExistsDocument is whether the document docID names exists and is not
+// deleted.
+func (c *Collection) ExistsDocument(
+	ctx context.Context,
+	docID client.DocID,
+	opts ...options.Enumerable[options.ExistsDocumentOptions],
+) (bool, error) {
+	o := newOptions(opts...)
+	name := c.Name()
+	request := fmt.Sprintf(`query { %s(docID: %q) { _docID } }`, name, docID.String())
+	res := c.st.exec(ctx, request, did(o.Identity), nil)
+	if len(res.GQL.Errors) > 0 {
+		return false, res.GQL.Errors[0]
+	}
+	return len(docIDs(res.GQL.Data, name)) > 0, nil
+}
+
+// UpdateDocumentsWithFilter applies updater, a JSON merge patch, to every
+// document filter matches. A JSON Patch updater is not supported.
+func (c *Collection) UpdateDocumentsWithFilter(
+	ctx context.Context,
+	filter any,
+	updater string,
+	opts ...options.Enumerable[options.UpdateDocumentsWithFilterOptions],
+) (*client.UpdateResult, error) {
+	o := newOptions(opts...)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(updater), &input); err != nil {
+		if strings.HasPrefix(strings.TrimSpace(updater), "[") {
+			return nil, errNotSupported("UpdateDocumentsWithFilter with a JSON Patch updater")
+		}
+		return nil, fmt.Errorf("defra: update filter: %w", err)
+	}
+	if text, ok := filter.(string); ok {
+		if err := json.Unmarshal([]byte(text), &filter); err != nil {
+			return nil, fmt.Errorf("defra: update filter: %w", err)
+		}
+	}
+	name := c.Name()
+	request := fmt.Sprintf(
+		`mutation($filter: %sFilterArg, $input: %sMutationInputArg) { update_%s(filter: $filter, input: $input) { _docID } }`,
+		name, name, name,
+	)
+	res := c.st.execSigned(ctx, request, did(o.Identity), map[string]any{"filter": filter, "input": input}, o.EnableSigning)
+	if len(res.GQL.Errors) > 0 {
+		return nil, res.GQL.Errors[0]
+	}
+	ids := docIDs(res.GQL.Data, "update_"+name)
+	return &client.UpdateResult{Count: int64(len(ids)), DocIDs: ids}, nil
 }
 
 // docIDs is the `_docID` of each row data[key] holds.

@@ -10,9 +10,19 @@ import (
 	"context"
 	"encoding/json"
 	"runtime/cgo"
-
-	"github.com/sourcenetwork/defradb/client"
 )
+
+// ReplicationFilter decides which replicated documents a node keeps: Go
+// Shinzo's replication filter, which Go DefraDB develop does not have.
+type ReplicationFilter interface {
+	// AllowReplication is asked for each replicated document before any of
+	// its blocks are stored. fields maps each field the document's head
+	// commit writes to its value; a value that has not arrived, is encrypted
+	// or does not decode is absent, so a filter keeps a document whose
+	// deciding field is missing. Return false to drop the document. It is
+	// called from several goroutines at once and must not block.
+	AllowReplication(ctx context.Context, collectionID string, docID string, fields map[string]any) bool
+}
 
 // defraSDKReplicationFilter is the library's replication filter callback for
 // a node opened with a ReplicationFilter: context is a cgo.Handle of the
@@ -28,7 +38,7 @@ func defraSDKReplicationFilter(context C.uintptr_t, collectionID, docID, fieldsJ
 			keep = 1
 		}
 	}()
-	filter, ok := cgo.Handle(context).Value().(client.ReplicationFilter)
+	filter, ok := cgo.Handle(context).Value().(ReplicationFilter)
 	if !ok {
 		return 1
 	}

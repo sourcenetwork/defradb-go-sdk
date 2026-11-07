@@ -106,3 +106,22 @@ func ffiError(op, message string) error {
 		return fmt.Errorf("defra: %s: %s", op, message)
 	}
 }
+
+// call is the JSON value an FfiResult holds, unmarshalled as T.
+func call[T any](r C.struct_FfiResult, op string) (T, error) {
+	raw, err := result(r, op)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return decode[T](raw, op)
+}
+
+// outsideTxn refuses op on a transaction: its library function runs outside
+// any transaction, so on one it would act on committed state instead.
+func (s *store) outsideTxn(op string) error {
+	if s.txn != "" {
+		return fmt.Errorf("defra: %s inside a transaction: %w", op, ErrNotSupported)
+	}
+	return nil
+}

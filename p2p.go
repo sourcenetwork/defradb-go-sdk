@@ -58,6 +58,9 @@ func (s *store) AddReplicator(
 	addresses []string,
 	opts ...options.Enumerable[options.AddReplicatorOptions],
 ) error {
+	if err := s.outsideTxn("AddReplicator"); err != nil {
+		return err
+	}
 	if len(addresses) == 0 {
 		return fmt.Errorf("defra: add_replicator: at least one address is required")
 	}
@@ -82,6 +85,9 @@ func (s *store) AddP2PCollections(
 	collectionNames []string,
 	opts ...options.Enumerable[options.AddP2PCollectionsOptions],
 ) error {
+	if err := s.outsideTxn("AddP2PCollections"); err != nil {
+		return err
+	}
 	o := newOptions(opts...)
 	var a cargs
 	defer a.free()
@@ -100,6 +106,9 @@ func (s *store) DeleteP2PCollections(
 	collectionNames []string,
 	opts ...options.Enumerable[options.DeleteP2PCollectionsOptions],
 ) error {
+	if err := s.outsideTxn("DeleteP2PCollections"); err != nil {
+		return err
+	}
 	o := newOptions(opts...)
 	var a cargs
 	defer a.free()

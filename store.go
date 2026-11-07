@@ -11,9 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/sourcenetwork/defradb/acp/identity"
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
-	"github.com/sourcenetwork/defradb/node"
+	"github.com/sourcenetwork/immutable"
 	lensmodel "github.com/sourcenetwork/lens/host-go/config/model"
 )
 
@@ -23,6 +24,8 @@ import (
 type store struct {
 	ptr C.uintptr_t
 	txn string
+	// self is the node's own identity, nil when it has none.
+	self identity.Identity
 }
 
 // AddCollection adds the collections the GraphQL SDL describes.
@@ -47,8 +50,8 @@ func (s *store) AddCollection(
 	return decode[[]client.CollectionVersion](raw, "add_collection")
 }
 
-// ExecRequest runs a GraphQL request. Go DefraDB's batch-signing collector
-// on ctx collects the composite blocks it writes.
+// ExecRequest runs a GraphQL request. A subscription's results arrive on
+// the result's Subscription channel until ctx ends.
 func (s *store) ExecRequest(
 	ctx context.Context,
 	request string,
@@ -59,12 +62,24 @@ func (s *store) ExecRequest(
 	if o.OperationName.HasValue() {
 		operation = o.OperationName.Value()
 	}
-	return s.execOperation(ctx, request, operation, did(o.Identity), o.Variables)
+	return s.execOperation(ctx, request, operation, did(o.Identity), o.Variables, immutable.None[bool]())
 }
 
 // exec runs request as identityDID with variables.
 func (s *store) exec(ctx context.Context, request string, identityDID string, variables map[string]any) *client.RequestResult {
-	return s.execOperation(ctx, request, "", identityDID, variables)
+	return s.execOperation(ctx, request, "", identityDID, variables, immutable.None[bool]())
+}
+
+// execSigned is exec with a write's signing override: none keeps the node's
+// own setting.
+func (s *store) execSigned(
+	ctx context.Context,
+	request string,
+	identityDID string,
+	variables map[string]any,
+	signing immutable.Option[bool],
+) *client.RequestResult {
+	return s.execOperation(ctx, request, "", identityDID, variables, signing)
 }
 
 func (s *store) execOperation(
@@ -73,6 +88,7 @@ func (s *store) execOperation(
 	operation string,
 	identityDID string,
 	variables map[string]any,
+	signing immutable.Option[bool],
 ) *client.RequestResult {
 	var a cargs
 	defer a.free()
@@ -84,27 +100,43 @@ func (s *store) execOperation(
 		}
 		vars = v
 	}
-	if node.BatchSigningCollectorFromContext(ctx) != nil {
-		return errResult(errNotSupported("BatchSigningCollector"))
+	override := C.int(-1)
+	if signing.HasValue() {
+		override = 0
+		if signing.Value() {
+			override = 1
+		}
 	}
-	raw, err := result(C.exec_request(
-		s.ptr, a.opt(s.txn), a.opt(identityDID), a.s(request), a.opt(operation), vars, nil,
-	), "exec_request")
+	r := C.exec_request_with_signing(
+		s.ptr, a.opt(s.txn), a.opt(identityDID), a.s(request), a.opt(operation), vars, nil, override,
+	)
+	if r.status == 2 {
+		id := C.GoString(r.value)
+		C.defra_free_string(r.value)
+		return &client.RequestResult{Subscription: subscribe(ctx, id)}
+	}
+	raw, err := result(r, "exec_request")
 	if err != nil {
 		return errResult(err)
 	}
+	return &client.RequestResult{GQL: gqlResult(raw)}
+}
+
+// gqlResult is the GraphQL response JSON raw holds.
+func gqlResult(raw string) client.GQLResult {
 	var response struct {
 		Data   any `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
+		Extensions *client.GQLExtensions `json:"extensions"`
 	}
 	if err := json.Unmarshal([]byte(raw), &response); err != nil {
-		return errResult(err)
+		return client.GQLResult{Errors: []error{err}}
 	}
-	out := &client.RequestResult{GQL: client.GQLResult{Data: response.Data}}
+	out := client.GQLResult{Data: response.Data, Extensions: response.Extensions}
 	for _, e := range response.Errors {
-		out.GQL.Errors = append(out.GQL.Errors, fmt.Errorf("%s", e.Message))
+		out.Errors = append(out.Errors, fmt.Errorf("%s", e.Message))
 	}
 	return out
 }
@@ -120,6 +152,20 @@ func (s *store) GetCollectionByName(
 	opts ...options.Enumerable[options.GetCollectionByNameOptions],
 ) (client.Collection, error) {
 	o := newOptions(opts...)
+	if s.txn != "" {
+		selector := options.GetCollections().SetCollectionName(string(name))
+		if o.Identity.HasValue() {
+			selector.SetIdentity(o.Identity.Value())
+		}
+		found, err := s.GetCollections(ctx, selector)
+		if err != nil {
+			return nil, err
+		}
+		if len(found) == 0 {
+			return nil, client.NewErrCollectionNotFoundForName(string(name))
+		}
+		return found[0], nil
+	}
 	var a cargs
 	defer a.free()
 	raw, err := result(C.get_collection_by_name(s.ptr, a.opt(did(o.Identity)), a.s(string(name))), "get_collection_by_name")

@@ -12,16 +12,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sourcenetwork/defradb/acp/identity"
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/event"
+	"github.com/sourcenetwork/immutable"
 )
 
 // DB is a started node's database: Go DefraDB's `client.TxnStore` and
-// `client.P2P`, so Go DefraDB's HTTP handler serves it. It is safe for
-// concurrent use.
+// `client.P2P`, with its event bus, so Go DefraDB's HTTP handler serves it.
+// It is safe for concurrent use.
 type DB struct {
 	store
-	events event.Bus
+	events *relay
 	closed sync.Once
 }
 
@@ -30,23 +32,43 @@ var (
 	_ client.Txn      = (*Txn)(nil)
 )
 
-// openDB is the database the node handle ptr names.
-func openDB(ptr C.uintptr_t) *DB {
-	return &DB{store: store{ptr: ptr}, events: event.NewChannelBus(0, 100)}
+// openDB is the database the node handle ptr names, its events relayed to a
+// Go bus. self is the identity the node was started with, if any.
+func openDB(ptr C.uintptr_t, self identity.Identity) (*DB, error) {
+	events, err := startRelay(ptr)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{store: store{ptr: ptr, self: self}, events: events}, nil
 }
 
-// Events is an event bus nothing publishes to: the Rust node offers no
-// event subscription Go's events can be relayed from.
+// Events is the database's event bus: update, merge-complete,
+// topic-peer-event and se-artifact-received events.
 func (d *DB) Events() event.Bus {
-	return d.events
+	return d.events.bus
 }
 
-// Close closes the database. Closing again does nothing.
+// Close stops the event relay and closes the database. Closing again does
+// nothing.
 func (d *DB) Close() {
 	d.closed.Do(func() {
+		d.events.stop()
 		_, _ = result(C.node_close(d.ptr), "close")
-		d.events.Close()
 	})
+}
+
+// GetNodeIdentityToken is a bearer token of the node's identity for
+// audience, valid for a day, as Go DefraDB makes it; nil when the node has
+// no identity.
+func (d *DB) GetNodeIdentityToken(ctx context.Context, audience immutable.Option[string]) ([]byte, error) {
+	if d.self == nil {
+		return nil, nil
+	}
+	full, ok := d.self.(identity.FullIdentity)
+	if !ok || full.PrivateKey() == nil {
+		return nil, identity.ErrPrivateKeyNotAvailable
+	}
+	return full.NewToken(24*time.Hour, audience, immutable.None[string]())
 }
 
 // RebuildCollectionIndexes does nothing: every write keeps the collection's
@@ -69,7 +91,7 @@ func (d *DB) NewTxn(readOnly bool) (client.Txn, error) {
 	}
 	id := C.GoString(r.txn_id)
 	C.defra_free_string(r.txn_id)
-	return &Txn{store: store{ptr: d.ptr, txn: id}, started: time.Now()}, nil
+	return &Txn{store: store{ptr: d.ptr, txn: id, self: d.self}, started: time.Now()}, nil
 }
 
 // Txn is a transaction: Go's `client.Txn`, a store whose writes land when
