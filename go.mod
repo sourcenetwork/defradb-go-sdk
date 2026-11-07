@@ -3,8 +3,6 @@ module github.com/sourcenetwork/defradb-go-sdk
 go 1.25.9
 
 require (
-	github.com/ipfs/go-cid v0.6.1
-	github.com/libp2p/go-libp2p v0.48.0
 	github.com/sourcenetwork/defradb v1.0.1-0.20261026140438-2a899b860df3
 	github.com/sourcenetwork/immutable v0.3.0
 	github.com/sourcenetwork/lens/host-go v0.11.0
@@ -203,6 +201,7 @@ require (
 	github.com/ipfs/bbloom v0.1.0 // indirect
 	github.com/ipfs/boxo v0.41.0 // indirect
 	github.com/ipfs/go-block-format v0.2.3 // indirect
+	github.com/ipfs/go-cid v0.6.1 // indirect
 	github.com/ipfs/go-cidutil v0.1.1 // indirect
 	github.com/ipfs/go-datastore v0.9.1 // indirect
 	github.com/ipfs/go-dsqueue v0.2.0 // indirect
@@ -237,6 +236,7 @@ require (
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
 	github.com/libp2p/go-cidranger v1.1.0 // indirect
 	github.com/libp2p/go-flow-metrics v0.3.0 // indirect
+	github.com/libp2p/go-libp2p v0.48.0 // indirect
 	github.com/libp2p/go-libp2p-asn-util v0.4.1 // indirect
 	github.com/libp2p/go-libp2p-kad-dht v0.40.0 // indirect
 	github.com/libp2p/go-libp2p-kbucket v0.8.0 // indirect

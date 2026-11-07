@@ -5,6 +5,7 @@ package defra
 
 import (
 	"context"
+	"io"
 
 	"github.com/sourcenetwork/defradb/acp/identity"
 	"github.com/sourcenetwork/defradb/client"
@@ -330,5 +331,31 @@ func (c *Collection) UpdateDocumentsWithFilter(
 	opts ...options.Enumerable[options.UpdateDocumentsWithFilterOptions],
 ) (_0 *client.UpdateResult, err error) {
 	err = errNotSupported("UpdateDocumentsWithFilter")
+	return
+}
+
+func (d *DB) ExportDocKVs(
+	ctx context.Context,
+	collectionName string,
+	docIDs []string,
+	w io.Writer,
+	datastoreOnly bool,
+) (_0 int, err error) {
+	err = errNotSupported("ExportDocKVs")
+	return
+}
+
+func (d *DB) ExportFieldMapping(ctx context.Context, collectionName string) (_0 []byte, err error) {
+	err = errNotSupported("ExportFieldMapping")
+	return
+}
+
+func (d *DB) ImportRawKVs(ctx context.Context, r io.Reader) (_0 int, err error) {
+	err = errNotSupported("ImportRawKVs")
+	return
+}
+
+func (d *DB) ImportRawKVsWithMapping(ctx context.Context, r io.Reader, mappingJSON []byte) (_0 int, err error) {
+	err = errNotSupported("ImportRawKVsWithMapping")
 	return
 }

@@ -8,12 +8,9 @@ import "C"
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
-	"github.com/ipfs/go-cid"
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
 	"github.com/sourcenetwork/defradb/node"
@@ -87,14 +84,12 @@ func (s *store) execOperation(
 		}
 		vars = v
 	}
-	var raw string
-	err := collect(ctx, func(session *C.char) error {
-		var err error
-		raw, err = result(C.exec_request(
-			s.ptr, a.opt(s.txn), a.opt(identityDID), a.s(request), a.opt(operation), vars, session,
-		), "exec_request")
-		return err
-	})
+	if node.BatchSigningCollectorFromContext(ctx) != nil {
+		return errResult(errNotSupported("BatchSigningCollector"))
+	}
+	raw, err := result(C.exec_request(
+		s.ptr, a.opt(s.txn), a.opt(identityDID), a.s(request), a.opt(operation), vars, nil,
+	), "exec_request")
 	if err != nil {
 		return errResult(err)
 	}
@@ -238,44 +233,4 @@ func decode[T any](raw string, op string) (T, error) {
 		return v, fmt.Errorf("defra: %s: %w", op, err)
 	}
 	return v, nil
-}
-
-// collect runs write; when ctx carries Go DefraDB's batch-signing collector
-// it runs it in a batch session of its own and adds the composite blocks it
-// wrote to that collector, as a Go node's writes do.
-func collect(ctx context.Context, write func(session *C.char) error) error {
-	collector := node.BatchSigningCollectorFromContext(ctx)
-	if collector == nil {
-		return write(nil)
-	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
-		return err
-	}
-	var a cargs
-	defer a.free()
-	session := a.s(hex.EncodeToString(id))
-	if _, err := result(C.batch_collect_start(session, nil), "batch_collect"); err != nil {
-		return err
-	}
-	written := write(session)
-	raw, err := result(C.batch_collect_take(session), "batch_collect")
-	if written != nil {
-		return written
-	}
-	if err != nil {
-		return err
-	}
-	cids, err := decode[[]string](raw, "batch_collect")
-	if err != nil {
-		return err
-	}
-	for _, s := range cids {
-		id, err := cid.Decode(s)
-		if err != nil {
-			return fmt.Errorf("defra: batch_collect: %w", err)
-		}
-		collector.Add(id)
-	}
-	return nil
 }

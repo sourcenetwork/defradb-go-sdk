@@ -1,7 +1,6 @@
 package defra
 
 /*
-#include <stddef.h>
 #include <stdint.h>
 */
 import "C"
@@ -11,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"runtime/cgo"
-	"unsafe"
 
 	"github.com/sourcenetwork/defradb/client"
 )
@@ -90,37 +88,4 @@ func numbers(value any) any {
 	default:
 		return v
 	}
-}
-
-// defraSDKRetentionRule is the library's retention callback: the Go
-// `client.RetentionRule` the handle context names gives the collection's
-// height field and floor. A floor of zero or less refuses nothing, and so
-// does a panic, the rule's or a deleted handle's.
-//
-//export defraSDKRetentionRule
-func defraSDKRetentionRule(
-	context C.uintptr_t,
-	collectionID *C.char,
-	fieldOut *C.char,
-	fieldCapacity C.size_t,
-	floorOut *C.int64_t,
-) (found C.int) {
-	defer func() {
-		if recover() != nil {
-			found = 0
-		}
-	}()
-	rule, ok := cgo.Handle(context).Value().(client.RetentionRule)
-	if !ok {
-		return 0
-	}
-	field, floor, covered := rule.RetentionFloor(C.GoString(collectionID))
-	if !covered || floor <= 0 || len(field) >= int(fieldCapacity) {
-		return 0
-	}
-	out := unsafe.Slice((*byte)(unsafe.Pointer(fieldOut)), int(fieldCapacity))
-	copy(out, field)
-	out[len(field)] = 0
-	*floorOut = C.int64_t(floor)
-	return 1
 }

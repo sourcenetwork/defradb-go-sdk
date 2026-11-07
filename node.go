@@ -5,8 +5,6 @@ package defra
 #include "defra.h"
 extern int defraSDKReplicationFilterShim(uintptr_t context, const char *collection_id,
                                          const char *doc_id, const char *fields_json);
-extern int defraSDKRetentionRuleShim(uintptr_t context, const char *collection_id,
-                                     char *field_out, size_t field_capacity, int64_t *floor_out);
 */
 import "C"
 
@@ -25,8 +23,8 @@ import (
 )
 
 // Node is a defradb.rs node in this process, shaped as Go DefraDB's
-// `node.Node`: build it with New, set ReplicationFilter and RetentionRule,
-// then Start it. DB is set once it has started.
+// `node.Node`: build it with New, set ReplicationFilter, then Start it. DB
+// is set once it has started.
 type Node struct {
 	// DB is the database; nil until Start.
 	DB *DB
@@ -36,8 +34,7 @@ type Node struct {
 	// ReplicationFilter refuses replicated documents before anything of them
 	// is stored. Set it between New and Start.
 	ReplicationFilter client.ReplicationFilter
-	// RetentionRule refuses replicated documents by height. Set it between
-	// New and Start.
+	// RetentionRule is not supported: Start fails when it is set.
 	RetentionRule client.RetentionRule
 
 	opts    *options.NodeOptions
@@ -48,10 +45,23 @@ type Node struct {
 }
 
 // New resolves opts over Go DefraDB's defaults; nothing opens until Start.
+// A P2P option the Rust node does not offer is an error naming it.
 func New(ctx context.Context, opts ...options.Enumerable[options.NodeOptions]) (*Node, error) {
 	resolved := node.DefaultNodeOptions()
 	applyOptions(&resolved, opts...)
+	if err := unsupportedP2P(resolved.P2P); err != nil {
+		return nil, err
+	}
 	return &Node{opts: &resolved, apiErr: make(chan error, 1)}, nil
+}
+
+// unsupportedP2P names the first P2P option o sets that the Rust node does
+// not offer.
+func unsupportedP2P(o options.NodeP2POptions) error {
+	if len(o.PrivateKey) > 0 {
+		return errNotSupported("P2P option PrivateKey")
+	}
+	return nil
 }
 
 // APIError receives at most one error: the HTTP API's server stopping for
@@ -72,10 +82,14 @@ func (n *Node) Options() *options.NodeOptions {
 //
 // Of the options it honours the store path and in-memory store, DisableP2P,
 // DisableAPI, the HTTP options, the DB identity (which signs the blocks the
-// node writes when signing is on) and every P2P option but
-// EnableClearBackoffOnRetry. BadgerFileSize, BadgerEncryptionKey and
-// LensRuntime have no Rust equivalent and are ignored.
+// node writes when signing is on), the ReplicationFilter and every P2P option
+// but EnableClearBackoffOnRetry and PrivateKey (New refuses a PrivateKey).
+// BadgerFileSize, BadgerEncryptionKey and LensRuntime have no Rust
+// equivalent and are ignored. A RetentionRule is an error.
 func (n *Node) Start(ctx context.Context) error {
+	if n.RetentionRule != nil {
+		return errNotSupported("RetentionRule")
+	}
 	initFFI()
 	o := n.opts
 	var a cargs
@@ -88,7 +102,6 @@ func (n *Node) Start(ctx context.Context) error {
 		c.in_memory = 1
 	}
 	c.iroh_discovery = 1
-	c.shinzo_wire = 1
 	if o.DB.Identity.HasValue() {
 		full, ok := o.DB.Identity.Value().(identity.FullIdentity)
 		if !ok {
@@ -110,16 +123,11 @@ func (n *Node) Start(ctx context.Context) error {
 		c.replication_filter = (*[0]byte)(C.defraSDKReplicationFilterShim)
 		c.replication_filter_context = C.uintptr_t(h)
 	}
-	if n.RetentionRule != nil {
-		h := cgo.NewHandle(n.RetentionRule)
-		n.handles = append(n.handles, h)
-		c.retention_rule = (*[0]byte)(C.defraSDKRetentionRuleShim)
-		c.retention_rule_context = C.uintptr_t(h)
-	}
 
 	var r C.struct_NewNodeResult
 	if !o.DisableP2P && len(o.P2P.ListenAddresses) > 0 {
 		if err := p2pOptions(&c, &a, o.P2P); err != nil {
+			n.freeHandles()
 			return err
 		}
 		r = C.new_node_with_p2p(c, nil)
@@ -132,13 +140,7 @@ func (n *Node) Start(ctx context.Context) error {
 		n.freeHandles()
 		return ffiError("start", message)
 	}
-	db, err := openDB(r.node_ptr)
-	if err != nil {
-		_, _ = result(C.node_close(r.node_ptr), "close")
-		n.freeHandles()
-		return err
-	}
-	n.DB = db
+	n.DB = openDB(r.node_ptr)
 	if o.DisableAPI {
 		return nil
 	}
@@ -203,7 +205,7 @@ func (n *Node) freeHandles() {
 
 // p2pOptions puts Go DefraDB's P2P options into c: every listen address and
 // bootstrap peer, GossipSub and the relay as Go switches them (off unless
-// set), the peer key and the resource limits.
+// set), and the resource limits.
 func p2pOptions(c *C.struct_NodeInitOptions, a *cargs, o options.NodeP2POptions) error {
 	listen, err := a.json(o.ListenAddresses)
 	if err != nil {
@@ -220,11 +222,6 @@ func p2pOptions(c *C.struct_NodeInitOptions, a *cargs, o options.NodeP2POptions)
 	}
 	if !o.EnableRelay {
 		c.p2p_disable_relay = 1
-	}
-	if len(o.PrivateKey) > 0 {
-		c.p2p_private_key = (*C.uint8_t)(C.CBytes(o.PrivateKey))
-		a.p = append(a.p, unsafe.Pointer(c.p2p_private_key))
-		c.p2p_private_key_len = C.size_t(len(o.PrivateKey))
 	}
 	if o.ResourceMemoryMiB > 0 {
 		c.p2p_resource_memory_mib = C.uint64_t(o.ResourceMemoryMiB)

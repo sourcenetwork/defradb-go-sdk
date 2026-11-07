@@ -14,6 +14,7 @@ import (
 
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
+	"github.com/sourcenetwork/defradb/node"
 )
 
 // Collection is one version of a collection, read and written through the
@@ -178,14 +179,12 @@ func (c *Collection) save(
 			return err
 		}
 	}
-	var raw string
-	err = collect(ctx, func(session *C.char) error {
-		var err error
-		raw, err = result(C.save_many_documents(
-			c.st.ptr, a.opt(c.st.txn), a.opt(identityDID), a.s(c.Name()), docsJSON, optionsJSON, session,
-		), "save_many_documents")
-		return err
-	})
+	if node.BatchSigningCollectorFromContext(ctx) != nil {
+		return errNotSupported("BatchSigningCollector")
+	}
+	raw, err := result(C.save_many_documents(
+		c.st.ptr, a.opt(c.st.txn), a.opt(identityDID), a.s(c.Name()), docsJSON, optionsJSON,
+	), "save_many_documents")
 	if err != nil {
 		return err
 	}
@@ -276,8 +275,9 @@ func (c *Collection) DeleteDocumentsWithFilter(
 	return &client.DeleteResult{Count: int64(len(ids)), DocIDs: ids}, nil
 }
 
-// PurgeByDocIDs removes docIDs from the node in one transaction, history and
-// all when pruneHistory is set; nothing is replicated.
+// PurgeByDocIDs removes docIDs from the node in one transaction; nothing is
+// replicated. The Rust node always removes their history too, unless the
+// collection is branchable, so pruneHistory has no effect.
 func (c *Collection) PurgeByDocIDs(
 	ctx context.Context,
 	docIDs []client.DocID,
@@ -296,7 +296,7 @@ func (c *Collection) PurgeByDocIDs(
 		return err
 	}
 	_, err = result(C.purge_documents(
-		c.st.ptr, a.opt(c.st.txn), a.opt(did(o.Identity)), a.s(c.Name()), idsJSON, C.bool(pruneHistory),
+		c.st.ptr, a.opt(c.st.txn), a.opt(did(o.Identity)), a.s(c.Name()), idsJSON,
 	), "purge_documents")
 	return err
 }

@@ -45,4 +45,6 @@ code that uses its new or changed functions, and let CI build and test the pair.
 ## What is not supported
 
 The Go DefraDB client methods the SDK does not offer yet are in `unsupported.go`;
-each returns an error that names it and wraps `ErrNotSupported`.
+each returns an error that names it and wraps `ErrNotSupported`. A P2P peer key
+makes `New` return such an error, and a retention rule makes `Start` return
+one.

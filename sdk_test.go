@@ -1,9 +1,7 @@
 package defra
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,11 +11,8 @@ import (
 	"testing"
 	"time"
 
-	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/sourcenetwork/defradb/client"
 	"github.com/sourcenetwork/defradb/client/options"
-	"github.com/sourcenetwork/defradb/event"
 	"github.com/sourcenetwork/defradb/node"
 )
 
@@ -223,81 +218,17 @@ func TestTransactionsAndPurgeByDocIDs(t *testing.T) {
 	}
 }
 
-func TestExportAndImportDocKVs(t *testing.T) {
-	source, target := start(t, nil, nil), start(t, nil, nil)
-	ctx := context.Background()
-	saved := docs(t, collectionOf(t, source.DB), `{"name": "Alice", "age": 40}`, `{"name": "Bob", "age": 7}`)
-	if err := collectionOf(t, source.DB).SaveManyDocuments(ctx, saved); err != nil {
-		t.Fatal(err)
-	}
-	var snapshot bytes.Buffer
-	frames, err := source.DB.ExportDocKVs(ctx, "User", nil, &snapshot, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mapping, err := source.DB.ExportFieldMapping(ctx, "User")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(mapping), `"collectionName":"User"`) {
-		t.Fatal(string(mapping))
-	}
-	imported, err := target.DB.ImportRawKVsWithMapping(ctx, &snapshot, mapping)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if imported != frames {
-		t.Fatalf("imported %d of %d frames", imported, frames)
-	}
-	if err := target.DB.RebuildCollectionIndexes(ctx, "User"); err != nil {
-		t.Fatal(err)
-	}
-	ids := `query { User(order: {name: ASC}) { _docID } }`
-	if a, b := query(t, source.DB, ids), query(t, target.DB, ids); a != b {
-		t.Fatalf("%s != %s", a, b)
-	}
-	if got := query(t, target.DB, `query { User(filter: {name: {_eq: "Bob"}}) { age } }`); got != `{"User":[{"age":7}]}` {
-		t.Fatal(got)
-	}
-}
-
-func TestGoBatchCollectorGetsEachComposite(t *testing.T) {
+func TestAGoBatchCollectorIsNotSupported(t *testing.T) {
 	n := start(t, nil, nil)
 	collector := node.NewBatchCIDCollector()
 	ctx := node.ContextWithBatchSigning(context.Background(), collector)
 	collection := collectionOf(t, n.DB)
-	if err := collection.AddManyDocuments(ctx, docs(t, collection, `{"name": "Alice", "age": 40}`, `{"name": "Bob", "age": 7}`)); err != nil {
-		t.Fatal(err)
+	err := collection.AddManyDocuments(ctx, docs(t, collection, `{"name": "Alice", "age": 40}`))
+	if !errors.Is(err, ErrNotSupported) {
+		t.Fatalf("a write with a batch collector says it is not supported: %v", err)
 	}
-	query(t, n.DB, `mutation { add_User(input: {name: "Carol", age: 1}) { _docID } }`)
-	if collector.Len() != 2 {
-		t.Fatalf("one composite per document written with the collector: %v", collector.GetCIDs())
-	}
-	if len(node.ComputeMerkleRoot(collector.GetCIDs())) == 0 {
-		t.Fatal("no merkle root")
-	}
-}
-
-func TestEventsCarryEachUpdate(t *testing.T) {
-	n := start(t, nil, nil)
-	sub, err := n.DB.Events().Subscribe(event.UpdateName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	collection := collectionOf(t, n.DB)
-	alice := docs(t, collection, `{"name": "Alice", "age": 40}`)[0]
-	if err := collection.AddDocument(context.Background(), alice); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case msg := <-sub.Message():
-		update, ok := msg.Data.(event.Update)
-		if !ok || update.DocID != alice.ID().String() || update.CollectionID != collection.CollectionID() ||
-			update.IsRelay || !update.Cid.Defined() || len(update.Block) == 0 {
-			t.Fatalf("%+v", msg)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("no update event")
+	if got := names(t, n.DB); got != `{"User":[]}` {
+		t.Fatalf("a refused write stores nothing: %s", got)
 	}
 }
 
@@ -333,33 +264,12 @@ func (f *refuseName) AllowReplication(ctx context.Context, collectionID, docID s
 	return fields["name"] != f.name
 }
 
-// ageFloor is a retention rule on every collection's age field, asked as
-// documents arrive, as Shinzo's host resolves its collections only once the
-// node has started.
-type ageFloor struct {
-	floor int64
-	calls atomic.Int64
-}
-
-func (r *ageFloor) RetentionFloor(collectionID string) (string, int64, bool) {
-	r.calls.Add(1)
-	return "age", r.floor, true
-}
-
-func TestReplicationThroughTheFilterAndTheRetentionRule(t *testing.T) {
+func TestReplicationThroughTheFilter(t *testing.T) {
 	ctx := context.Background()
 	filter := &refuseName{name: "Mallory"}
-	rule := &ageFloor{floor: 3}
 	listen := func(nb *options.NodeOptionsBuilder) { nb.P2P().SetListenAddresses("/ip4/127.0.0.1/tcp/0") }
 	source := start(t, listen, nil)
-	target := start(t, listen, func(n *Node) {
-		n.ReplicationFilter = filter
-		n.RetentionRule = rule
-	})
-	merges, err := target.DB.Events().Subscribe(event.MergeCompleteName)
-	if err != nil {
-		t.Fatal(err)
-	}
+	target := start(t, listen, func(n *Node) { n.ReplicationFilter = filter })
 	addresses, err := target.DB.PeerInfo(ctx)
 	if err != nil || len(addresses) == 0 {
 		t.Fatalf("peer info %v %v", addresses, err)
@@ -368,7 +278,7 @@ func TestReplicationThroughTheFilterAndTheRetentionRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := docs(t, collectionOf(t, source.DB),
-		`{"name": "Alice", "age": 40}`, `{"name": "Mallory", "age": 9}`, `{"name": "Bob", "age": 7}`, `{"name": "Tiny", "age": 2}`)
+		`{"name": "Alice", "age": 40}`, `{"name": "Mallory", "age": 9}`, `{"name": "Bob", "age": 7}`)
 	if err := collectionOf(t, source.DB).SaveManyDocuments(ctx, saved); err != nil {
 		t.Fatal(err)
 	}
@@ -376,27 +286,18 @@ func TestReplicationThroughTheFilterAndTheRetentionRule(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		got := names(t, target.DB)
-		if got == want && filter.calls.Load() >= 1 && rule.calls.Load() >= 1 {
+		if got == want && filter.calls.Load() >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the target holds %s after %d filter and %d rule calls; want %s",
-				got, filter.calls.Load(), rule.calls.Load(), want)
+			t.Fatalf("the target holds %s after %d filter calls; want %s", got, filter.calls.Load(), want)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	// Mallory and Tiny were refused, not just late.
+	// Mallory was refused, not just late.
 	time.Sleep(time.Second)
 	if got := names(t, target.DB); got != want {
 		t.Fatal(got)
-	}
-	select {
-	case msg := <-merges.Message():
-		if merge, ok := msg.Data.(event.MergeComplete); !ok || merge.Merge.DocID == "" || !merge.Merge.Cid.Defined() {
-			t.Fatalf("%+v", msg)
-		}
-	default:
-		t.Fatal("no merge-complete event for the replicated documents")
 	}
 }
 
@@ -410,30 +311,32 @@ func TestDecodeFieldsAsGoDecodesCBOR(t *testing.T) {
 	}
 }
 
-func TestSetPrivateKeyGivesGosPeerID(t *testing.T) {
-	key, _, err := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+func TestUnsupportedNodeOptionsAreErrors(t *testing.T) {
+	ctx := context.Background()
+	nb := options.Node()
+	nb.P2P().SetPrivateKey([]byte{1})
+	if _, err := New(ctx, nb); !errors.Is(err, ErrNotSupported) || !strings.Contains(err.Error(), "PrivateKey") {
+		t.Fatalf("a peer key: %v", err)
+	}
+	nb = options.Node()
+	nb.SetDisableAPI(true)
+	n, err := New(ctx, nb)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := key.Raw()
-	if err != nil {
-		t.Fatal(err)
+	n.RetentionRule = noFloor{}
+	if err := n.Start(ctx); !errors.Is(err, ErrNotSupported) || !strings.Contains(err.Error(), "RetentionRule") {
+		_ = n.Close(ctx)
+		t.Fatalf("a retention rule: %v", err)
 	}
-	want, err := peer.IDFromPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := start(t, func(nb *options.NodeOptionsBuilder) {
-		nb.P2P().SetListenAddresses("/ip4/127.0.0.1/tcp/0").SetPrivateKey(raw)
-	}, nil)
-	addresses, err := n.DB.PeerInfo(context.Background())
-	if err != nil || len(addresses) == 0 {
-		t.Fatalf("peer info %v %v", addresses, err)
-	}
-	if !strings.HasSuffix(addresses[0], "/p2p/"+want.String()) {
-		t.Fatalf("%s is not peer %s", addresses[0], want)
+	if n.DB != nil {
+		t.Fatal("a refused Start opened the database")
 	}
 }
+
+type noFloor struct{}
+
+func (noFloor) RetentionFloor(string) (string, int64, bool) { return "", 0, false }
 
 func TestEveryListenAddressAndTheResourceLimits(t *testing.T) {
 	n := start(t, func(nb *options.NodeOptionsBuilder) {
@@ -454,26 +357,6 @@ func TestEveryListenAddressAndTheResourceLimits(t *testing.T) {
 	}
 }
 
-func TestTheEventRelayParksWhileIdle(t *testing.T) {
-	n := start(t, nil, nil)
-	sub, err := n.DB.Events().Subscribe(event.UpdateName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := n.DB.waits.Load()
-	time.Sleep(1500 * time.Millisecond)
-	// A wait lasts up to a second, so an idle relay makes about two.
-	if idle := n.DB.waits.Load() - before; idle > 3 {
-		t.Fatalf("the idle relay waited %d times in 1.5s", idle)
-	}
-	query(t, n.DB, `mutation { add_User(input: {name: "Alice", age: 40}) { _docID } }`)
-	select {
-	case <-sub.Message():
-	case <-time.After(5 * time.Second):
-		t.Fatal("an event arrives while the relay is parked")
-	}
-}
-
 func TestCloseTwice(t *testing.T) {
 	n := start(t, nil, nil)
 	if err := n.Close(context.Background()); err != nil {
@@ -491,22 +374,12 @@ func (f *panicFilter) AllowReplication(context.Context, string, string, map[stri
 	panic("filter")
 }
 
-type panicRule struct{ calls atomic.Int64 }
-
-func (r *panicRule) RetentionFloor(string) (string, int64, bool) {
-	r.calls.Add(1)
-	panic("rule")
-}
-
-func TestAPanickingFilterOrRuleKeepsTheDocument(t *testing.T) {
+func TestAPanickingFilterKeepsTheDocument(t *testing.T) {
 	ctx := context.Background()
-	filter, rule := &panicFilter{}, &panicRule{}
+	filter := &panicFilter{}
 	listen := func(nb *options.NodeOptionsBuilder) { nb.P2P().SetListenAddresses("/ip4/127.0.0.1/tcp/0") }
 	source := start(t, listen, nil)
-	target := start(t, listen, func(n *Node) {
-		n.ReplicationFilter = filter
-		n.RetentionRule = rule
-	})
+	target := start(t, listen, func(n *Node) { n.ReplicationFilter = filter })
 	addresses, err := target.DB.PeerInfo(ctx)
 	if err != nil || len(addresses) == 0 {
 		t.Fatalf("peer info %v %v", addresses, err)
@@ -521,12 +394,11 @@ func TestAPanickingFilterOrRuleKeepsTheDocument(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		got := names(t, target.DB)
-		if got == want && filter.calls.Load() >= 1 && rule.calls.Load() >= 1 {
+		if got == want && filter.calls.Load() >= 1 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the target holds %s after %d filter and %d rule calls; want %s",
-				got, filter.calls.Load(), rule.calls.Load(), want)
+			t.Fatalf("the target holds %s after %d filter calls; want %s", got, filter.calls.Load(), want)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
