@@ -295,12 +295,15 @@ func TestReplicationThroughTheFilter(t *testing.T) {
 }
 
 func TestDecodeFieldsAsGoDecodesCBOR(t *testing.T) {
-	fields, err := decodeFields(`{"n": 5, "m": -5, "f": 1.5, "s": "x"}`)
+	fields, err := decodeFields(`{"n": 5, "m": -5, "f": 1.5, "w": 3.0, "big": 18446744073709551615, "s": "x"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fields["n"] != uint64(5) || fields["m"] != int64(-5) || fields["f"] != 1.5 || fields["s"] != "x" {
 		t.Fatalf("%#v", fields)
+	}
+	if fields["w"] != float64(3) || fields["big"] != uint64(18446744073709551615) {
+		t.Fatalf("a whole-number float stays a float and a large uint64 stays exact: %#v", fields)
 	}
 }
 

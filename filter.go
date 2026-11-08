@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"runtime/cgo"
+	"strconv"
 )
 
 // ReplicationFilter decides which replicated documents a node keeps: Go
@@ -82,6 +83,11 @@ func numbers(value any) any {
 			if u >= 0 {
 				return uint64(u)
 			}
+			return u
+		}
+		// A uint64 above MaxInt64; the library writes a float as 3.0, never 3,
+		// so a whole number here is always an integer.
+		if u, err := strconv.ParseUint(v.String(), 10, 64); err == nil {
 			return u
 		}
 		if f, err := v.Float64(); err == nil {
