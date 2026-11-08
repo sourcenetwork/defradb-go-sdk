@@ -4,7 +4,8 @@
 #include "_cgo_export.h"
 
 int defraSDKReplicationFilterShim(uintptr_t context, const char *collection_id,
-                                  const char *doc_id, const char *fields_json) {
-    return defraSDKReplicationFilter(context, (char *)collection_id, (char *)doc_id,
-                                     (char *)fields_json);
+                                  const char *collection_name, const char *doc_id,
+                                  const char *fields_json) {
+    return defraSDKReplicationFilter(context, (char *)collection_id, (char *)collection_name,
+                                     (char *)doc_id, (char *)fields_json);
 }

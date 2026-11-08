@@ -238,14 +238,19 @@ func TestStartServesGoDefraDBsHTTPAPI(t *testing.T) {
 	}
 }
 
-// refuseName refuses a document whose name field is the one it names.
+// refuseName refuses a document whose name field is the one it names, and
+// counts calls that name a collection other than User.
 type refuseName struct {
-	name  string
-	calls atomic.Int64
+	name       string
+	calls      atomic.Int64
+	notUserCol atomic.Int64
 }
 
-func (f *refuseName) AllowReplication(ctx context.Context, collectionID, docID string, fields map[string]any) bool {
+func (f *refuseName) AllowReplication(ctx context.Context, collectionName, docID string, fields map[string]any) bool {
 	f.calls.Add(1)
+	if collectionName != "User" {
+		f.notUserCol.Add(1)
+	}
 	return fields["name"] != f.name
 }
 
@@ -283,6 +288,9 @@ func TestReplicationThroughTheFilter(t *testing.T) {
 	time.Sleep(time.Second)
 	if got := names(t, target.DB); got != want {
 		t.Fatal(got)
+	}
+	if n := filter.notUserCol.Load(); n != 0 {
+		t.Fatalf("%d filter calls named a collection other than User", n)
 	}
 }
 

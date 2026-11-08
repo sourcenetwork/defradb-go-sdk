@@ -16,23 +16,26 @@ import (
 // Shinzo's replication filter, which Go DefraDB develop does not have.
 type ReplicationFilter interface {
 	// AllowReplication is asked for each replicated document before any of
-	// its blocks are stored. fields maps each field the document's head
+	// its blocks are stored, with the collection's name, as Go Shinzo gives
+	// it. fields maps each field the document's head
 	// commit writes to its value; a value that has not arrived, is encrypted
 	// or does not decode is absent, so a filter keeps a document whose
 	// deciding field is missing. Return false to drop the document. It is
 	// called from several goroutines at once and must not block.
-	AllowReplication(ctx context.Context, collectionID string, docID string, fields map[string]any) bool
+	AllowReplication(ctx context.Context, collectionName string, docID string, fields map[string]any) bool
 }
 
 // defraSDKReplicationFilter is the library's replication filter callback for
 // a node opened with a ReplicationFilter: context is a cgo.Handle of the
-// filter. The library calls it from its database workers, several at once.
+// filter. The library calls it from its database workers and network
+// threads, several at once, with the collection's ID and name; the filter is
+// given the name.
 // A panic, the filter's or a deleted handle's, keeps the document: a panic
 // must not cross into the library, and keeping is what a filter that cannot
 // decide does.
 //
 //export defraSDKReplicationFilter
-func defraSDKReplicationFilter(context C.uintptr_t, collectionID, docID, fieldsJSON *C.char) (keep C.int) {
+func defraSDKReplicationFilter(context C.uintptr_t, collectionID, collectionName, docID, fieldsJSON *C.char) (keep C.int) {
 	defer func() {
 		if recover() != nil {
 			keep = 1
@@ -47,7 +50,7 @@ func defraSDKReplicationFilter(context C.uintptr_t, collectionID, docID, fieldsJ
 		// A filter must keep a document whose deciding field is absent.
 		fields = map[string]any{}
 	}
-	if filter.AllowReplication(backgroundContext, C.GoString(collectionID), C.GoString(docID), fields) {
+	if filter.AllowReplication(backgroundContext, C.GoString(collectionName), C.GoString(docID), fields) {
 		return 1
 	}
 	return 0

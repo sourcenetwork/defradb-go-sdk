@@ -4,7 +4,8 @@ package defra
 #include <stdlib.h>
 #include "defra.h"
 extern int defraSDKReplicationFilterShim(uintptr_t context, const char *collection_id,
-                                         const char *doc_id, const char *fields_json);
+                                         const char *collection_name, const char *doc_id,
+                                         const char *fields_json);
 */
 import "C"
 
